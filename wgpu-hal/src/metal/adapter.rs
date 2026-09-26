@@ -1,11 +1,11 @@
 use objc2::rc::autoreleasepool;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{available, sel};
-use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
+use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo, NSString};
 use objc2_metal::{
-    MTLArgumentBuffersTier, MTLCounterSamplingPoint, MTLDevice, MTLFeatureSet, MTLGPUFamily,
-    MTLIndirectAccelerationStructureInstanceDescriptor, MTLLanguageVersion, MTLPixelFormat,
-    MTLReadWriteTextureTier,
+    MTLArgumentBuffersTier, MTLCompileOptions, MTLCounterSamplingPoint, MTLDevice, MTLFeatureSet,
+    MTLGPUFamily, MTLIndirectAccelerationStructureInstanceDescriptor, MTLLanguageVersion,
+    MTLPixelFormat, MTLReadWriteTextureTier,
 };
 use wgt::{AstcBlock, AstcChannel};
 
@@ -729,6 +729,7 @@ impl super::CapabilitiesQuery {
         } else {
             MTLLanguageVersion::Version1_0
         };
+        let msl_version = probe_msl_version(device, msl_version);
 
         Self {
             msl_version,
@@ -1591,6 +1592,40 @@ impl super::CapabilitiesQuery {
             format_astc_hdr: self.format_astc_hdr,
         }
     }
+}
+
+/// The newest language version the runtime compiler actually accepts, at or
+/// below `wanted`. The OS version normally implies it, but OpenCore Legacy
+/// Patcher runs current macOS on old GPUs with a patched Metal compiler that
+/// stops one or two versions short, and then every `newLibraryWithSource`
+/// fails. One trivial kernel compile per adapter settles it up front.
+fn probe_msl_version(
+    device: &ProtocolObject<dyn MTLDevice>,
+    wanted: MTLLanguageVersion,
+) -> MTLLanguageVersion {
+    const LADDER: [MTLLanguageVersion; 6] = [
+        MTLLanguageVersion::Version4_0,
+        MTLLanguageVersion::Version3_2,
+        MTLLanguageVersion::Version3_1,
+        MTLLanguageVersion::Version3_0,
+        MTLLanguageVersion::Version2_4,
+        MTLLanguageVersion::Version2_3,
+    ];
+    let source = NSString::from_str("#include <metal_stdlib>\nkernel void wgpu_probe() {}\n");
+    for &version in LADDER.iter().skip_while(|&&v| v != wanted) {
+        let options = MTLCompileOptions::new();
+        options.setLanguageVersion(version);
+        if device
+            .newLibraryWithSource_options_error(&source, Some(&options))
+            .is_ok()
+        {
+            if version != wanted {
+                log::warn!("Metal compiler rejects MSL {wanted:?}; using {version:?}");
+            }
+            return version;
+        }
+    }
+    wanted
 }
 
 impl super::PrivateCapabilities {
